@@ -1,0 +1,71 @@
+name: Build, Deploy, and Document Python App
+
+on:
+  push:
+    branches:
+      - main # Or your default branch
+  workflow_dispatch: # Allows manual triggering
+
+env:
+  PYTHON_VERSION: '3.9'
+  # AZURE_APP_NAME and AZURE_RESOURCE_GROUP are set from secrets for security/config
+  CODE_TO_DOCUMENT_PATH: 'app' # Relative path to the code you want to document
+
+jobs:
+  build-deploy-document:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Zip App for deployment
+        # This zips the 'app' directory and 'requirements.txt' into deploy.zip
+        # App Service for Python will run `pip install -r requirements.txt` from the zip root.
+        run: |
+          zip -r deploy.zip . -i 'app/*' 'requirements.txt'
+        # If you have files in root: zip -r deploy.zip app requirements.txt *.py
+        # The key is requirements.txt should be at the root of the zip for App Service build.
+
+      - name: Login to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+
+      - name: Deploy to Azure Web App # Example for Azure secrets
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ secrets.AZURE_APP_NAME }}
+          resource-group-name: ${{ secrets.AZURE_RESOURCE_GROUP }}
+          package: deploy.zip
+          # The azure/login action uses secrets.AZURE_CREDENTIALS
+
+      - name: Generate and Publish Documentation
+        env:
+          # These environment variables are set for the 'run' command below
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CONFLUENCE_URL: ${{ secrets.CONFLUENCE_URL }}
+          CONFLUENCE_EMAIL: ${{ secrets.CONFLUENCE_EMAIL }}
+          CONFLUENCE_API_TOKEN: ${{ secrets.CONfluence_API_TOKEN }} # Corrected case from previous examples if it was wrong
+          CONFLUENCE_SPACE_KEY: ${{ secrets.CONFLUENCE_SPACE_KEY }}
+          ROOT_DOC_TITLE: "${{ github.repository }} - Project Docs"
+          CODE_ROOT_PATH: "app"
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+        run: python scripts/doc_generator.py
+
+      - name: Azure Logout
+        run: |
+          az logout
+          az cache purge
+          az account clear
+        if: always()
