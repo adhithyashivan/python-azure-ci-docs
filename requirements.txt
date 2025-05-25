@@ -1,0 +1,4 @@
+Flask>=2.0 # Ensure a reasonably modern version
+gunicorn>=20.0 # For Azure App Service deployment
+requests>=2.25
+openai>=1.0   # Check for latest version
