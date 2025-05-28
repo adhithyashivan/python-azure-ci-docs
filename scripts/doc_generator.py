@@ -1,163 +1,149 @@
 import os
-import requests  # For Confluence API AND Hugging Face API
+import requests  # For Confluence API
+import openai   # For OpenAI API
 import json
 import sys
 from requests.auth import HTTPBasicAuth
-import time
+import time  # For potential rate limiting
 
 # --- Configuration ---
+# These values will be injected by the GitHub Actions workflow as environment variables.
+# DO NOT HARDCODE SENSITIVE KEYS DIRECTLY IN THE SCRIPT IN A REAL SCENARIO.
 
-# For Hugging Face Inference API:
-# Set via GitHub Secrets: secrets.HF_API_TOKEN
-HF_API_TOKEN = os.environ.get("HF_API_TOKEN")
-# Set via GitHub Actions env var, e.g., "google/flan-t5-base" or "google/flan-t5-large"
-HF_MODEL_ID = os.environ.get("HF_MODEL_ID", "google/flan-t5-base")
-HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL_ID}"
+# For OpenAI API:
+# In GitHub Actions, this would be set from a secret: ${{ secrets.OPENAI_API_KEY }}
+# Example value you provided: "ABC1212121" (This is just for illustration)
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    print("Error: OPENAI_API_KEY environment variable not set.")
+    # OPENAI_API_KEY = "ABC1212121" # << ONLY FOR LOCAL TESTING, REMOVE FOR CI/CD
+    # sys.exit(1) # Uncomment this line in production if key is missing
 
 # For Confluence:
-# Set via GitHub Secrets: secrets.CONFLUENCE_URL
+# Your Confluence site base URL (up to '/wiki')
+# In GitHub Actions, this would be set from a secret: ${{ secrets.CONFLUENCE_URL }}
+# Example based on your provided URL: "https://test-test.atlassian.net/wiki"
 CONFLUENCE_BASE_URL = os.environ.get("CONFLUENCE_URL")
-# Set via GitHub Secrets: secrets.CONFLUENCE_EMAIL
-CONFLUENCE_USER_EMAIL = os.environ.get("CONFLUENCE_EMAIL")
-# Set via GitHub Secrets: secrets.CONFLUENCE_API_TOKEN
-CONFLUENCE_API_TOKEN = os.environ.get("CONFLUENCE_API_TOKEN")
-# Set via GitHub Secrets: secrets.CONFLUENCE_SPACE_KEY
-CONFLUENCE_SPACE_KEY = os.environ.get("CONFLUENCE_SPACE_KEY")
+if not CONFLUENCE_BASE_URL:
+    print("Error: CONFLUENCE_URL environment variable not set.")
+    # CONFLUENCE_BASE_URL = "https://test-test.atlassian.net/wiki" # << ONLY FOR LOCAL TESTING
+    # sys.exit(1) # Uncomment this line in production if URL is missing
 
-# Code and Documentation Structure:
-# Set via GitHub Actions env var, e.g., 'app'
-CODE_ROOT_DIR_RELATIVE_PATH = os.environ.get("CODE_ROOT_PATH", "app")
-# Set via GitHub Actions env var, e.g., "${{ github.repository }} - Automated Docs"
+# Your Atlassian account email (used for API authentication with the token)
+# In GitHub Actions, this would be set from a secret: ${{ secrets.CONFLUENCE_EMAIL }}
+CONFLUENCE_USER_EMAIL = os.environ.get("CONFLUENCE_EMAIL")
+if not CONFLUENCE_USER_EMAIL:
+    print("Error: CONFLUENCE_EMAIL environment variable not set.")
+    # sys.exit(1)
+
+# Your Confluence API Token
+# In GitHub Actions, this would be set from a secret: ${{ secrets.CONFLUENCE_API_TOKEN }}
+CONFLUENCE_API_TOKEN = os.environ.get("CONFLUENCE_API_TOKEN")
+if not CONFLUENCE_API_TOKEN:
+    print("Error: CONFLUENCE_API_TOKEN environment variable not set.")
+    # sys.exit(1)
+
+# The Key of your Confluence Space (e.g., "APD" from your URL)
+# In GitHub Actions, this would be set from a secret: ${{ secrets.CONFLUENCE_SPACE_KEY }}
+CONFLUENCE_SPACE_KEY = os.environ.get("CONFLUENCE_SPACE_KEY")
+if not CONFLUENCE_SPACE_KEY:
+    print("Error: CONFLUENCE_SPACE_KEY environment variable not set.")
+    # CONFLUENCE_SPACE_KEY = "APD" # << ONLY FOR LOCAL TESTING
+    # sys.exit(1)
+
+# The root directory of the code to document, relative to the repository root.
+# In GitHub Actions, this would be set via an env var in the workflow, e.g., 'app'
+CODE_ROOT_DIR_RELATIVE_PATH = os.environ.get(
+    "CODE_ROOT_PATH", "app")  # Default to 'app'
+
+# A root page title for all generated docs for this project/run.
+# In GitHub Actions, this could be: ${{ github.repository }} - Automated Docs
 ROOT_DOC_PROJECT_TITLE = os.environ.get(
     "ROOT_DOC_TITLE", "Project Documentation")
+
+# --- Initialize OpenAI Client ---
+# Ensure the API key is set before trying to initialize the client
+if OPENAI_API_KEY:
+    try:
+        client = openai.OpenAI(api_key=OPENAI_API_KEY)
+    except Exception as e:
+        print(f"Error initializing OpenAI client: {e}")
+        client = None  # Ensure client is None if initialization fails
+else:
+    client = None
+    print("OpenAI client not initialized because API key is missing.")
 
 
 # --- Helper Functions ---
 
-def get_ai_documentation_hf(file_content, file_path):
-    """Generates documentation for a Python file using Hugging Face Inference API for Flan-T5."""
-    if not HF_API_TOKEN:
+def get_ai_documentation(file_content, file_path):
+    """Generates documentation for a Python file using OpenAI."""
+    if not client:
         print(
-            f"Hugging Face API Token (HF_API_TOKEN) not set. Skipping AI documentation for {file_path}.")
-        return f"h2. Error: Configuration Issue\n\nHF_API_TOKEN not set. Could not generate documentation for {file_path}."
+            f"OpenAI client not available. Skipping AI documentation for {file_path}.")
+        return f"Error: OpenAI client not initialized. Could not generate documentation for {file_path}."
 
-    # Construct the final API URL using the environment variable
-    # This is just for clarity, it's the same as the global HF_API_URL
-    current_hf_api_url = f"https://api-inference.huggingface.co/models/{HF_MODEL_ID}"
-    # Print the URL being used
-    print(f"    DEBUG: Constructed HF API URL: {current_hf_api_url}")
+    # Enhanced prompt for better structure and Confluence compatibility
+    prompt = f"""
+    Please act as an expert technical writer. Analyze the following Python code from the file '{file_path}'.
+    Generate documentation in Confluence Wiki Markup format.
 
-    instruction = (
-        "Generate detailed technical documentation in Confluence Wiki Markup format for the following Python code. "
-        "The documentation should include:\n"
-        "1. *File Overview:* A concise summary of the file's purpose.\n"
-        "2. *Classes (if any):* For each class, describe its purpose, key attributes, and methods (purpose, parameters, returns).\n"
-        "3. *Functions (if any, not part of a class):* For each function, describe its purpose, parameters, and returns.\n"
-        "Use Confluence Wiki Markup: h1. Title, h2. Subtitle, *bold*, _italic_, * list item."
-    )
-    prompt_template = (
-        f"{instruction}\n\n"
-        f"Python file: {file_path}\n"
-        f"```python\n{file_content}\n```\n\n"
-        f"Confluence Wiki Markup Documentation:"
-    )
+    The documentation should include:
+    1.  *File Overview:* A concise summary of the file's purpose, its main components, and any key dependencies it might imply (at a high level).
+    2.  *Classes (if any):* For each class:
+        *   Class Name and Signature (e.g., `h3. Class: MyClass(BaseClass)`)
+        *   Purpose: A clear description of what the class does.
+        *   Key Attributes: Important instance or class variables and their roles.
+        *   Methods: For each method (including `__init__`):
+            *   Method Signature (e.g., `h4. Method: my_method(self, param1, param2=None)`)
+            *   Purpose: What the method does.
+            *   Parameters: A list of parameters with their expected types and descriptions (e.g., `* param1 (int): Description of param1.`).
+            *   Returns: What the method returns, including type (e.g., `* Returns: (str) Description of return value.`).
+    3.  *Functions (if any, not part of a class):* For each function:
+        *   Function Signature (e.g., `h3. Function: my_global_function(param1)`)
+        *   Purpose: What the function does.
+        *   Parameters: A list of parameters with their types and descriptions.
+        *   Returns: What the function returns, including type.
+    4.  *Usage Example (Optional but Recommended):* If feasible, a brief code snippet showing how to use a key function or class from this file.
 
-    headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
-    # Add Content-Type header, which is good practice for POST requests with JSON body
-    headers["Content-Type"] = "application/json"
+    Use Confluence Wiki Markup:
+    - Headings: `h1.`, `h2.`, `h3.`, `h4.`
+    - Bold: `*text*`
+    - Italics: `_text_`
+    - Unordered lists: `* item` (star followed by a space)
+    - Code blocks: `{{{{code:python}}}} ... {{{{code}}}}` or `{{{{noformat}}}} ... {{{{noformat}}}}` for simple code snippets.
 
-    # Print headers (mask most of token)
-    print(
-        f"    DEBUG: Request Headers (Token partially masked): Authorization: Bearer hf_...{HF_API_TOKEN[-4:] if HF_API_TOKEN and len(HF_API_TOKEN) > 4 else 'TOKEN_INVALID_OR_SHORT'}")
+    Here is the code content:
+    ---- START OF CODE ----
+    {file_content}
+    ---- END OF CODE ----
 
-    payload = {
-        "inputs": prompt_template,
-        "parameters": {
-            "max_new_tokens": 1536,
-            "min_new_tokens": 50,
-            "return_full_text": False,
-            "temperature": 0.7,
-            "do_sample": True,
-        },
-        "options": {
-            "wait_for_model": True,
-            "use_gpu": False
-        }
-    }
-    # Print the payload
-    print(f"    DEBUG: Payload being sent: {json.dumps(payload, indent=2)}")
-
-    max_retries = 4
-    retry_delay = 15
+    Provide only the Confluence Wiki Markup content for the page body.
+    """
+    max_retries = 3
+    retry_delay = 5  # seconds
     for attempt in range(max_retries):
         try:
+            response = client.chat.completions.create(
+                model="gpt-3.5-turbo",  # Or "gpt-4" if you have access and budget
+                messages=[
+                    {"role": "system", "content": "You are an expert technical writer generating Confluence Wiki Markup documentation for Python code."},
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            return response.choices[0].message.content.strip()
+        except openai.RateLimitError as e:
             print(
-                f"  Requesting documentation from Hugging Face ({HF_MODEL_ID}) for {file_path} (Attempt {attempt+1}/{max_retries})...")
-            # Use current_hf_api_url
-            response = requests.post(
-                current_hf_api_url, headers=headers, json=payload, timeout=180)
-
-            # Print status code
-            print(f"    DEBUG: Response Status Code: {response.status_code}")
-            # Try to print response text regardless of status code for debugging, if it's not too large
-            try:
-                response_text_preview = response.text[:500] + "..." if len(
-                    response.text) > 500 else response.text
-                print(
-                    f"    DEBUG: Response Text Preview: {response_text_preview}")
-            except Exception as e_text:
-                print(f"    DEBUG: Could not get response text: {e_text}")
-
-            if response.status_code == 200:
-                # ... (rest of the success handling code from previous version) ...
-                result = response.json()
-                if isinstance(result, list) and result and "generated_text" in result[0]:
-                    generated_doc = result[0]["generated_text"].strip()
-                    if generated_doc:
-                        print(
-                            f"    Successfully received documentation from Hugging Face for {file_path}")
-                        return generated_doc
-                    else:
-                        print(
-                            f"    Hugging Face returned empty 'generated_text' for {file_path}. Response: {result}")
-                        return f"h2. Notice: No Documentation Generated\n\nThe AI model returned an empty response for {file_path}."
-                else:
-                    print(
-                        f"    Hugging Face response for {file_path} has unexpected format. Response: {result}")
-                    return f"h2. Error: AI Model Response Issue\n\nUnexpected response format from Hugging Face for {file_path}. Check model compatibility or API changes."
-
-            elif response.status_code == 429:
-                print(
-                    f"    Hugging Face Rate Limit Error for {file_path}. Retrying in {retry_delay}s...")
-            elif response.status_code == 503:
-                print(
-                    f"    Hugging Face Model Unavailable (503) for {file_path}. Model: {HF_MODEL_ID}. Retrying in {retry_delay}s...")
-            # elif response.status_code == 404: # Handled by the generic else for now
-            #     print(f"    Hugging Face Model Not Found (404) for {file_path}. Model: {HF_MODEL_ID}. This is unexpected for standard models.")
-            #     # For 404, retrying usually won't help if the URL or model ID is wrong.
-            #     # But let's keep the retry for now to see if it's intermittent.
-            else:
-                print(
-                    f"    Error calling Hugging Face API for {file_path}. Status: {response.status_code}.")
-                if attempt == max_retries - 1:
-                    return f"h2. Error: AI API Call Failed\n\nHugging Face API call failed for {file_path} with status {response.status_code} after multiple retries. Response Preview: {response_text_preview if 'response_text_preview' in locals() else 'N/A'}"
-
-        except requests.exceptions.Timeout:
-            print(
-                f"    Request to Hugging Face timed out for {file_path} (Attempt {attempt+1}/{max_retries}).")
-        except requests.exceptions.RequestException as e:
-            print(
-                f"    Request Exception calling Hugging Face API for {file_path}: {e}")
-
-        if attempt < max_retries - 1:
+                f"OpenAI Rate Limit Error for {file_path}: {e}. Retrying in {retry_delay}s... (Attempt {attempt+1}/{max_retries})")
             time.sleep(retry_delay)
-            retry_delay = min(retry_delay * 1.5, 60)
-        else:
-            print(
-                f"Failed to get documentation from Hugging Face for {file_path} after {max_retries} retries.")
-            return f"h2. Error: AI Processing Failed\n\nFailed to retrieve documentation from Hugging Face for {file_path} after multiple retries due to API issues or timeouts."
+            retry_delay *= 2  # Exponential backoff
+        except Exception as e:
+            print(f"Error calling OpenAI for {file_path}: {e}")
+            return f"h2. Error Generating Documentation\n\nAn error occurred while generating AI documentation for {file_path}:\n{{{{noformat}}}}\n{e}\n{{{{noformat}}}}"
 
-    return f"h2. Error: Unknown AI Processing Issue\n\nAn unknown error occurred while trying to generate documentation for {file_path}."
+    print(
+        f"Failed to get documentation from OpenAI for {file_path} after {max_retries} retries.")
+    return f"h2. Error Generating Documentation\n\nFailed to retrieve documentation from OpenAI for {file_path} after multiple retries due to rate limiting or other API issues."
 
 
 def get_confluence_page_id_and_version(title, space_key):
@@ -220,20 +206,21 @@ def create_or_update_confluence_page(title, body_content, space_key, parent_id=N
     }
 
     if parent_id:
+        # Ensure parent_id is string
         data["ancestors"] = [{"id": str(parent_id)}]
 
     max_retries = 3
-    retry_delay = 5
+    retry_delay = 5  # seconds
     for attempt in range(max_retries):
         try:
-            if page_id:
+            if page_id:  # Update existing page
                 data["id"] = page_id
                 data["version"] = {"number": current_version + 1}
                 api_url_specific = f"{api_url_base}/{page_id}"
                 response = requests.put(api_url_specific, headers=headers, data=json.dumps(
                     data), auth=auth, timeout=30)
                 action_taken = "Updating"
-            else:
+            else:  # Create new page
                 api_url_specific = api_url_base
                 response = requests.post(
                     api_url_specific, headers=headers, data=json.dumps(data), auth=auth, timeout=30)
@@ -241,7 +228,7 @@ def create_or_update_confluence_page(title, body_content, space_key, parent_id=N
 
             print(
                 f"{action_taken} page '{title}' (Attempt {attempt+1}/{max_retries})...")
-            response.raise_for_status()
+            response.raise_for_status()  # Will raise HTTPError for bad responses (4xx or 5xx)
 
             new_page_id = response.json().get("id")
             print(
@@ -252,13 +239,18 @@ def create_or_update_confluence_page(title, body_content, space_key, parent_id=N
             print(
                 f"HTTP Error {action_taken.lower()} Confluence page '{title}': {e.response.status_code} - {e.response.reason}")
             print(f"Response content: {e.response.text}")
-            if e.response.status_code == 409:  # Conflict
+            if e.response.status_code == 409:  # Conflict, likely version mismatch or concurrent edit
+                print(
+                    "Conflict error (409) detected. Page might have been updated. Re-fetching version...")
                 page_id, current_version = get_confluence_page_id_and_version(
-                    title, space_key)
-                if page_id is None:
+                    title, space_key)  # Re-fetch
+                if page_id is None:  # Page was deleted in the meantime
+                    print("Page seems to have been deleted. Attempting to create.")
+                    # Reset page_id to allow creation in next attempt, if any
                     page_id = None
-                    current_version = None
-                    continue
+                    current_version = None  # Reset version as well
+                    continue  # Retry immediately with create logic
+            # For other errors, or if retries exhausted for 409
             if attempt < max_retries - 1:
                 print(f"Retrying in {retry_delay}s...")
                 time.sleep(retry_delay)
@@ -267,7 +259,7 @@ def create_or_update_confluence_page(title, body_content, space_key, parent_id=N
                 print(
                     f"Failed to {action_taken.lower()} page '{title}' after {max_retries} attempts.")
                 return None
-        except requests.exceptions.RequestException as e:
+        except requests.exceptions.RequestException as e:  # Other network issues
             print(
                 f"Request Error {action_taken.lower()} Confluence page '{title}': {e}")
             if attempt < max_retries - 1:
@@ -276,27 +268,44 @@ def create_or_update_confluence_page(title, body_content, space_key, parent_id=N
                 retry_delay *= 2
             else:
                 print(
-                    f"Failed to {action_taken.lower()} page '{title}' after {max_retries} attempts.")
+                    f"Failed to {action_taken.lower()} page '{title}' after {max_retries} attempts due to network issues.")
                 return None
-    return None
+    return None  # Should be unreachable if loop logic is correct
 
 
 def process_directory_recursively(current_dir_abs_path, space_key, current_confluence_parent_id, code_base_dir_abs_path):
-    """Recursively processes directories and files to generate documentation."""
+    """
+    Recursively processes directories and files to generate documentation.
+    Creates corresponding parent/child pages in Confluence.
+    `current_dir_abs_path`: Absolute path of the directory currently being processed.
+    `code_base_dir_abs_path`: Absolute path of the root directory for documentation (e.g., .../workspace/app).
+    """
     print(f"Processing directory: {current_dir_abs_path}")
+
+    # Sort items to ensure consistent page ordering
     items_in_dir = sorted(os.listdir(current_dir_abs_path))
 
     for item_name in items_in_dir:
         item_abs_path = os.path.join(current_dir_abs_path, item_name)
+        # Path relative to the initial CODE_ROOT_DIR_RELATIVE_PATH (e.g., "utils/calculator.py" or "main.py")
         item_relative_to_code_base = os.path.relpath(
             item_abs_path, code_base_dir_abs_path)
 
         if os.path.isdir(item_abs_path):
+            # Create a Confluence page for this subdirectory
+            # Title format: "Project Root Title: path / to / subdir"
             dir_page_title = f"{ROOT_DOC_PROJECT_TITLE}: {item_relative_to_code_base.replace(os.sep, ' / ')}"
             print(f"  Creating/Updating directory page: '{dir_page_title}'")
-            dir_content = f"h1. Directory: {item_name}\n\nDocumentation for modules and subdirectories within '{item_name}'."
+
+            # Simple content for directory page
+            dir_content = f"h1. Directory: {item_name}\n\nThis page contains documentation for modules and subdirectories within '{item_name}'."
+
             new_parent_id_for_children = create_or_update_confluence_page(
-                dir_page_title, dir_content, space_key, current_confluence_parent_id)
+                dir_page_title,
+                dir_content,
+                space_key,
+                current_confluence_parent_id
+            )
 
             if new_parent_id_for_children:
                 process_directory_recursively(
@@ -307,27 +316,35 @@ def process_directory_recursively(current_dir_abs_path, space_key, current_confl
 
         elif item_name.endswith(".py"):
             print(f"  Processing Python file: {item_abs_path}")
+            # Title format: "Project Root Title: path/to/file.py"
             file_page_title = f"{ROOT_DOC_PROJECT_TITLE}: {item_relative_to_code_base}"
+
             try:
                 with open(item_abs_path, 'r', encoding='utf-8') as f:
                     file_content = f.read()
+
                 if not file_content.strip():
                     print(f"  Skipping empty file: {item_abs_path}")
                     continue
 
                 print(
                     f"    Generating AI documentation for: '{file_page_title}'")
-                ai_doc_content = get_ai_documentation_hf(
-                    file_content, item_relative_to_code_base)  # MODIFIED
+                ai_doc_content = get_ai_documentation(
+                    file_content, item_relative_to_code_base)
 
                 if ai_doc_content:
                     print(
                         f"    Publishing documentation to Confluence for: '{file_page_title}'")
                     create_or_update_confluence_page(
-                        file_page_title, ai_doc_content, space_key, current_confluence_parent_id)
+                        file_page_title,
+                        ai_doc_content,
+                        space_key,
+                        current_confluence_parent_id
+                    )
                 else:
                     print(
                         f"    No documentation content generated by AI for {item_abs_path}")
+
             except Exception as e:
                 print(f"  Error processing file {item_abs_path}: {e}")
         else:
@@ -337,25 +354,36 @@ def process_directory_recursively(current_dir_abs_path, space_key, current_confl
 # --- Main Execution ---
 if __name__ == "__main__":
     # Basic check for essential configs
-    if not all([HF_API_TOKEN, CONFLUENCE_BASE_URL, CONFLUENCE_USER_EMAIL, CONFLUENCE_API_TOKEN, CONFLUENCE_SPACE_KEY]):
+    if not all([OPENAI_API_KEY, CONFLUENCE_BASE_URL, CONFLUENCE_USER_EMAIL, CONFLUENCE_API_TOKEN, CONFLUENCE_SPACE_KEY]):
         print("CRITICAL ERROR: One or more essential environment variables for API access are missing.")
-        missing_vars = [var for var, val in [
-            ("HF_API_TOKEN", HF_API_TOKEN),
-            ("CONFLUENCE_BASE_URL", CONFLUENCE_BASE_URL),
-            ("CONFLUENCE_USER_EMAIL", CONFLUENCE_USER_EMAIL),
-            ("CONFLUENCE_API_TOKEN", CONFLUENCE_API_TOKEN),
-            ("CONFLUENCE_SPACE_KEY", CONFLUENCE_SPACE_KEY)
-        ] if not val]
-        print(f"Missing: {', '.join(missing_vars)}")
+        print("Required: OPENAI_API_KEY, CONFLUENCE_URL, CONFLUENCE_EMAIL, CONFLUENCE_API_TOKEN, CONFLUENCE_SPACE_KEY")
+        sys.exit(1)  # Exit if critical credentials are not found
+
+    if not client:  # Check if OpenAI client was initialized
+        print("CRITICAL ERROR: OpenAI client could not be initialized. Check API key and network.")
         sys.exit(1)
 
-    print("Starting documentation generation process using Hugging Face Flan-T5...")
-    print(f"  Hugging Face Model ID: {HF_MODEL_ID}")
+    print("Starting documentation generation process...")
     print(f"  Project Title for Docs: {ROOT_DOC_PROJECT_TITLE}")
     print(f"  Confluence Space Key: {CONFLUENCE_SPACE_KEY}")
     print(f"  Relative Code Path to Document: '{CODE_ROOT_DIR_RELATIVE_PATH}'")
 
-    project_root_page_body = f"h1. {ROOT_DOC_PROJECT_TITLE}\n\nThis page is the root for automatically generated documentation for the project (using Hugging Face Model: {HF_MODEL_ID}). It covers code found in the '{CODE_ROOT_DIR_RELATIVE_PATH}' directory."
+    # Create/get the main project root page in Confluence.
+    # All other pages will be children of this page (or children of its directory sub-pages).
+    project_root_page_body = f"h1. {ROOT_DOC_PROJECT_TITLE}\n\nThis page is the root for automatically generated documentation for the project. It covers code found in the '{CODE_ROOT_DIR_RELATIVE_PATH}' directory."
+
+    # The "homepageId=111111" in your example URL (https://test-test.atlassian.net/wiki/spaces/APD/overview?homepageId=111111)
+    # refers to the ID of the *Space Homepage*. If you want your ROOT_DOC_PROJECT_TITLE page to be a child of the Space Homepage,
+    # you need to pass its ID as parent_id.
+    # However, finding the Space Homepage ID programmatically can be tricky.
+    # For simplicity, this script creates ROOT_DOC_PROJECT_TITLE directly under the space root (no parent_id).
+    # If you want it under a specific existing page (like the space homepage), you'd need to:
+    # 1. Manually find that page's ID in Confluence (often visible in the URL when editing, or via API).
+    # 2. Pass that ID as an environment variable, e.g., CONFLUENCE_ROOT_PARENT_ID_FOR_PROJECT.
+    # For now, we are not using a parent for the main project root page. It will appear at the top level of the space page tree.
+
+    # CONFLUENCE_OVERVIEW_PAGE_ID = "111111" # Example based on your URL, if you wanted to make it a child of this
+    # Better to pass this via env var if needed.
 
     print(
         f"Creating/Updating the main project documentation page: '{ROOT_DOC_PROJECT_TITLE}'")
@@ -363,29 +391,37 @@ if __name__ == "__main__":
         ROOT_DOC_PROJECT_TITLE,
         project_root_page_body,
         CONFLUENCE_SPACE_KEY
+        # parent_id=CONFLUENCE_OVERVIEW_PAGE_ID # << Uncomment and set if you want it as a child of specific page
     )
 
     if project_root_confluence_page_id:
         print(
             f"Successfully created/updated project root page. ID: {project_root_confluence_page_id}")
+
+        # Resolve the absolute path to the code directory to be documented
+        # In GitHub Actions, GITHUB_WORKSPACE is the root of your checked-out repo.
+        # Default to current dir if not in GHA
         github_workspace = os.environ.get("GITHUB_WORKSPACE", ".")
         code_to_document_abs_path = os.path.abspath(
             os.path.join(github_workspace, CODE_ROOT_DIR_RELATIVE_PATH))
+
         print(f"Absolute path to document: {code_to_document_abs_path}")
 
         if os.path.isdir(code_to_document_abs_path):
+            # Start recursive processing. Files/dirs directly under code_to_document_abs_path
+            # will become children of project_root_confluence_page_id.
             process_directory_recursively(
                 code_to_document_abs_path,
                 CONFLUENCE_SPACE_KEY,
                 project_root_confluence_page_id,
-                code_to_document_abs_path
+                code_to_document_abs_path  # This is the base for relative path calculations
             )
             print("Documentation generation process completed.")
         else:
             print(
-                f"Error: Code path '{code_to_document_abs_path}' (from '{CODE_ROOT_DIR_RELATIVE_PATH}') is not a valid directory.")
+                f"Error: The specified code path '{code_to_document_abs_path}' (from relative '{CODE_ROOT_DIR_RELATIVE_PATH}') is not a valid directory.")
             sys.exit(1)
     else:
         print(
-            f"CRITICAL ERROR: Failed to create or update main project documentation page: '{ROOT_DOC_PROJECT_TITLE}'. Aborting.")
+            f"CRITICAL ERROR: Failed to create or update the main project documentation page: '{ROOT_DOC_PROJECT_TITLE}'. Aborting.")
         sys.exit(1)

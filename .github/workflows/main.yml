@@ -1,88 +1,71 @@
-name: Build, Deploy Python App to Azure, and Document with Flan-T5
+name: Build, Deploy, and Document Python App
 
 on:
   push:
     branches:
-      - main # Or your default branch (e.g., master)
-  workflow_dispatch: # Allows manual triggering from the Actions tab
+      - main # Or your default branch
+  workflow_dispatch: # Allows manual triggering
 
 env:
-  PYTHON_VERSION: '3.9' # Define Python version for consistency
-  # AZURE_APP_NAME and AZURE_RESOURCE_GROUP are set from secrets for the deployment step
-  CODE_TO_DOCUMENT_PATH: 'app' # Relative path in your repo to the Python code you want to document
-  # HF_MODEL_ID will be set in the documentation job's environment
-  
+  PYTHON_VERSION: '3.9'
+  # AZURE_APP_NAME and AZURE_RESOURCE_GROUP are set from secrets for security/config
+  CODE_TO_DOCUMENT_PATH: 'app' # Relative path to the code you want to document
+
 jobs:
   build-deploy-document:
     runs-on: ubuntu-latest
-    # Optional: if you set up environments in GitHub for different stages
-    # environment: production 
-
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Set up Python ${{ env.PYTHON_VERSION }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt # Ensure requirements.txt includes flask, gunicorn, requests
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-    - name: Zip App for Azure deployment
-      # This zips the 'app' directory and 'requirements.txt' into deploy.zip
-      # App Service for Python will run `pip install -r requirements.txt` from the zip root.
-      run: |
-        echo "Zipping application files..."
-        zip -r deploy.zip . -i '${{ env.CODE_TO_DOCUMENT_PATH }}/*' 'requirements.txt'
-        echo "Contents of deploy.zip:"
-        unzip -l deploy.zip # List contents to verify
+      - name: Zip App for deployment
+        # This zips the 'app' directory and 'requirements.txt' into deploy.zip
+        # App Service for Python will run `pip install -r requirements.txt` from the zip root.
+        run: |
+          zip -r deploy.zip . -i 'app/*' 'requirements.txt'
+        # If you have files in root: zip -r deploy.zip app requirements.txt *.py
+        # The key is requirements.txt should be at the root of the zip for App Service build.
 
-    - name: Login to Azure
-      uses: azure/login@v1
-      with:
-        creds: ${{ secrets.AZURE_CREDENTIALS }} # Secret containing the JSON output of `az ad sp create-for-rbac`
+      - name: Login to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-    - name: Deploy to Azure Web App
-      id: deploy-to-azure # Give this step an ID to access its outputs if needed
-      uses: azure/webapps-deploy@v2
-      with:
-        app-name: ${{ secrets.AZURE_APP_NAME }}
-        resource-group-name: ${{ secrets.AZURE_RESOURCE_GROUP }} # Often not strictly needed if app-name is globally unique
-        package: deploy.zip
-        # slot-name: 'production' # Optional: if using deployment slots
 
-    - name: Output Azure Web App URL
-      run: echo "App deployed to https://${{ steps.deploy-to-azure.outputs.webapp-url }}"
+      - name: Deploy to Azure Web App # Example for Azure secrets
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ secrets.AZURE_APP_NAME }}
+          resource-group-name: ${{ secrets.AZURE_RESOURCE_GROUP }}
+          package: deploy.zip
+          # The azure/login action uses secrets.AZURE_CREDENTIALS
 
-    - name: Generate and Publish Documentation with Flan-T5
-      env:
-        # Hugging Face API Credentials
-        HF_API_TOKEN: ${{ secrets.HF_API_TOKEN }}
-        HF_MODEL_ID: "distilgpt2"  # Or "google/flan-t5-large", "google/flan-t5-small" etc.
-                                           # Choose based on desired quality vs. speed/rate limits.
+      - name: Generate and Publish Documentation
+        env:
+          # These environment variables are set for the 'run' command below
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CONFLUENCE_URL: ${{ secrets.CONFLUENCE_URL }}
+          CONFLUENCE_EMAIL: ${{ secrets.CONFLUENCE_EMAIL }}
+          CONFLUENCE_API_TOKEN: ${{ secrets.CONfluence_API_TOKEN }} # Corrected case from previous examples if it was wrong
+          CONFLUENCE_SPACE_KEY: ${{ secrets.CONFLUENCE_SPACE_KEY }}
+          ROOT_DOC_TITLE: "${{ github.repository }} - Project Docs"
+          CODE_ROOT_PATH: "app"
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+        run: python scripts/doc_generator.py
 
-        # Confluence Credentials
-        CONFLUENCE_URL: ${{ secrets.CONFLUENCE_URL }}
-        CONFLUENCE_EMAIL: ${{ secrets.CONFLUENCE_EMAIL }}
-        CONFLUENCE_API_TOKEN: ${{ secrets.CONFLUENCE_API_TOKEN }}
-        CONFLUENCE_SPACE_KEY: ${{ secrets.CONFLUENCE_SPACE_KEY }}
-        
-        # Documentation Structure
-        ROOT_DOC_TITLE: "${{ github.repository }} - HF Flan-T5 Docs" # e.g., "yourusername/your-repo - HF Flan-T5 Docs"
-        CODE_ROOT_PATH: ${{ env.CODE_TO_DOCUMENT_PATH }} # Using the global env var 'app'
-        GITHUB_WORKSPACE: ${{ github.workspace }} # Automatically provided by Actions, used by doc_generator.py
-      run: |
-        echo "Starting documentation generation script..."
-        python scripts/doc_generator.py
-
-    - name: Azure Logout
-      # Optional: good practice if other Azure CLI steps followed or if runner might be reused in complex scenarios
-      run: |
-        az logout
-        az cache purge
-        az account clear
-      if: always() # Run this even if previous steps fail (to ensure cleanup)
+      - name: Azure Logout
+        run: |
+          az logout
+          az cache purge
+          az account clear
+        if: always()
