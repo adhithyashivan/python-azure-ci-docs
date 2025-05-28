@@ -41,9 +41,12 @@ def get_ai_documentation_hf(file_content, file_path):
             f"Hugging Face API Token (HF_API_TOKEN) not set. Skipping AI documentation for {file_path}.")
         return f"h2. Error: Configuration Issue\n\nHF_API_TOKEN not set. Could not generate documentation for {file_path}."
 
-    # Flan-T5 often works well with a clear prefix indicating the task.
-    # This prompt needs significant experimentation for optimal results with Flan-T5
-    # and Confluence Wiki Markup. Start simple and iterate.
+    # Construct the final API URL using the environment variable
+    # This is just for clarity, it's the same as the global HF_API_URL
+    current_hf_api_url = f"https://api-inference.huggingface.co/models/{HF_MODEL_ID}"
+    # Print the URL being used
+    print(f"    DEBUG: Constructed HF API URL: {current_hf_api_url}")
+
     instruction = (
         "Generate detailed technical documentation in Confluence Wiki Markup format for the following Python code. "
         "The documentation should include:\n"
@@ -60,33 +63,53 @@ def get_ai_documentation_hf(file_content, file_path):
     )
 
     headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
+    # Add Content-Type header, which is good practice for POST requests with JSON body
+    headers["Content-Type"] = "application/json"
+
+    # Print headers (mask most of token)
+    print(
+        f"    DEBUG: Request Headers (Token partially masked): Authorization: Bearer hf_...{HF_API_TOKEN[-4:] if HF_API_TOKEN and len(HF_API_TOKEN) > 4 else 'TOKEN_INVALID_OR_SHORT'}")
+
     payload = {
         "inputs": prompt_template,
         "parameters": {
-            "max_new_tokens": 1536,  # Increased for potentially longer docs
-            "min_new_tokens": 50,   # Ensure some minimum output
+            "max_new_tokens": 1536,
+            "min_new_tokens": 50,
             "return_full_text": False,
             "temperature": 0.7,
-            "do_sample": True,  # Usually good to set True if temperature is not 0 or 1
-            # "top_k": 50, # Optional: nucleus sampling parameters
-            # "top_p": 0.95, # Optional: nucleus sampling parameters
+            "do_sample": True,
         },
-        "options": {  # Ensure the model waits for results if it's not immediately ready
+        "options": {
             "wait_for_model": True,
-            "use_gpu": False  # GitHub free runners don't have GPUs
+            "use_gpu": False
         }
     }
+    # Print the payload
+    print(f"    DEBUG: Payload being sent: {json.dumps(payload, indent=2)}")
 
-    max_retries = 4  # Increased retries due to potential free tier slowness
-    retry_delay = 15  # seconds
+    max_retries = 4
+    retry_delay = 15
     for attempt in range(max_retries):
         try:
             print(
                 f"  Requesting documentation from Hugging Face ({HF_MODEL_ID}) for {file_path} (Attempt {attempt+1}/{max_retries})...")
+            # Use current_hf_api_url
             response = requests.post(
-                HF_API_URL, headers=headers, json=payload, timeout=180)  # Increased timeout
+                current_hf_api_url, headers=headers, json=payload, timeout=180)
+
+            # Print status code
+            print(f"    DEBUG: Response Status Code: {response.status_code}")
+            # Try to print response text regardless of status code for debugging, if it's not too large
+            try:
+                response_text_preview = response.text[:500] + "..." if len(
+                    response.text) > 500 else response.text
+                print(
+                    f"    DEBUG: Response Text Preview: {response_text_preview}")
+            except Exception as e_text:
+                print(f"    DEBUG: Could not get response text: {e_text}")
 
             if response.status_code == 200:
+                # ... (rest of the success handling code from previous version) ...
                 result = response.json()
                 if isinstance(result, list) and result and "generated_text" in result[0]:
                     generated_doc = result[0]["generated_text"].strip()
@@ -95,29 +118,29 @@ def get_ai_documentation_hf(file_content, file_path):
                             f"    Successfully received documentation from Hugging Face for {file_path}")
                         return generated_doc
                     else:
-                        # Empty generated_text can happen
                         print(
                             f"    Hugging Face returned empty 'generated_text' for {file_path}. Response: {result}")
                         return f"h2. Notice: No Documentation Generated\n\nThe AI model returned an empty response for {file_path}."
                 else:
-                    # Handle cases where the response is not what's expected
                     print(
                         f"    Hugging Face response for {file_path} has unexpected format. Response: {result}")
                     return f"h2. Error: AI Model Response Issue\n\nUnexpected response format from Hugging Face for {file_path}. Check model compatibility or API changes."
 
-            elif response.status_code == 429:  # Rate limit
+            elif response.status_code == 429:
                 print(
-                    f"    Hugging Face Rate Limit Error for {file_path}. Response: {response.text}. Retrying in {retry_delay}s...")
-            elif response.status_code == 503:  # Model loading or temporarily unavailable
+                    f"    Hugging Face Rate Limit Error for {file_path}. Retrying in {retry_delay}s...")
+            elif response.status_code == 503:
                 print(
-                    f"    Hugging Face Model Unavailable (503) for {file_path}. Model: {HF_MODEL_ID}. Response: {response.text}. Retrying in {retry_delay}s...")
-            else:  # Other errors
+                    f"    Hugging Face Model Unavailable (503) for {file_path}. Model: {HF_MODEL_ID}. Retrying in {retry_delay}s...")
+            # elif response.status_code == 404: # Handled by the generic else for now
+            #     print(f"    Hugging Face Model Not Found (404) for {file_path}. Model: {HF_MODEL_ID}. This is unexpected for standard models.")
+            #     # For 404, retrying usually won't help if the URL or model ID is wrong.
+            #     # But let's keep the retry for now to see if it's intermittent.
+            else:
                 print(
-                    f"    Error calling Hugging Face API for {file_path}. Status: {response.status_code}, Response: {response.text}")
-                # For non-transient errors, may not want to retry all of them.
-                if attempt == max_retries - 1:  # If last attempt
-                    return f"h2. Error: AI API Call Failed\n\nHugging Face API call failed for {file_path} with status {response.status_code} after multiple retries. Response: {response.text}"
-                # else continue to retry for other potentially transient server errors
+                    f"    Error calling Hugging Face API for {file_path}. Status: {response.status_code}.")
+                if attempt == max_retries - 1:
+                    return f"h2. Error: AI API Call Failed\n\nHugging Face API call failed for {file_path} with status {response.status_code} after multiple retries. Response Preview: {response_text_preview if 'response_text_preview' in locals() else 'N/A'}"
 
         except requests.exceptions.Timeout:
             print(
@@ -128,14 +151,12 @@ def get_ai_documentation_hf(file_content, file_path):
 
         if attempt < max_retries - 1:
             time.sleep(retry_delay)
-            # Exponential backoff with a cap
             retry_delay = min(retry_delay * 1.5, 60)
         else:
             print(
                 f"Failed to get documentation from Hugging Face for {file_path} after {max_retries} retries.")
             return f"h2. Error: AI Processing Failed\n\nFailed to retrieve documentation from Hugging Face for {file_path} after multiple retries due to API issues or timeouts."
 
-    # Fallback if loop completes without returning (should not happen if logic is correct)
     return f"h2. Error: Unknown AI Processing Issue\n\nAn unknown error occurred while trying to generate documentation for {file_path}."
 
 
