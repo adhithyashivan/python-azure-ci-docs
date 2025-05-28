@@ -62,7 +62,7 @@ jobs:
       env:
         # Hugging Face API Credentials
         HF_API_TOKEN: ${{ secrets.HF_API_TOKEN }}
-        HF_MODEL_ID: "google/flan-t5-base"  # Or "google/flan-t5-large", "google/flan-t5-small" etc.
+        HF_MODEL_ID: "distilgpt2"  # Or "google/flan-t5-large", "google/flan-t5-small" etc.
                                            # Choose based on desired quality vs. speed/rate limits.
 
         # Confluence Credentials
